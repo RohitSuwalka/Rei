@@ -1,5 +1,6 @@
 import hashlib
 import shutil
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from pypdf import PdfReader
@@ -29,11 +30,12 @@ def _generate_pdf_id(filename: str) -> str:
 
 def _human_size(size_bytes: int) -> str:
     """Convert bytes to human-readable string."""
+    size = float(size_bytes)
     for unit in ["B", "KB", "MB", "GB"]:
-        if size_bytes < 1024:
-            return f"{size_bytes:.1f} {unit}"
-        size_bytes /= 1024
-    return f"{size_bytes:.1f} TB"
+        if size < 1024:
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
 
 
 def save_pdf(file_bytes: bytes, filename: str) -> Path:
@@ -46,14 +48,20 @@ def save_pdf(file_bytes: bytes, filename: str) -> Path:
     return dest
 
 
-def extract_text(pdf_path: Path) -> str:
+def extract_text(
+    pdf_path: Path,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> str:
     """Extract full text from PDF (same logic as read_pdf.py)."""
     reader = PdfReader(str(pdf_path))
     full_text = ""
-    for page in reader.pages:
+    page_count = len(reader.pages)
+    for page_number, page in enumerate(reader.pages, start=1):
         text = page.extract_text()
         if text:
             full_text += text + "\n"
+        if progress_callback:
+            progress_callback(page_number, page_count)
     return full_text
 
 
@@ -72,7 +80,11 @@ def chunk_text(text: str) -> list[str]:
     return splitter.split_text(text)
 
 
-def process_pdf(file_bytes: bytes, filename: str) -> dict:
+def process_pdf(
+    file_bytes: bytes,
+    filename: str,
+    progress_callback: Callable[[str, int], None] | None = None,
+) -> dict:
     """
     Full PDF processing pipeline:
     1. Save to storage
@@ -86,14 +98,30 @@ def process_pdf(file_bytes: bytes, filename: str) -> dict:
     pdf_path = save_pdf(file_bytes, filename)
 
     # Extract
-    text = extract_text(pdf_path)
-    page_count = get_page_count(pdf_path)
+    if progress_callback:
+        progress_callback("Extracting text from PDF...", 10)
+
+    def report_page(page_number: int, total_pages: int) -> None:
+        if progress_callback:
+            percent = 10 + round(30 * page_number / max(total_pages, 1))
+            progress_callback(
+                f"Extracting text (page {page_number}/{total_pages})...",
+                percent,
+            )
+
+    reader = PdfReader(str(pdf_path))
+    page_count = len(reader.pages)
+    text = extract_text(pdf_path, report_page)
 
     if not text.strip():
         raise ValueError(f"No text could be extracted from '{filename}'. It may be a scanned/image PDF.")
 
     # Chunk
+    if progress_callback:
+        progress_callback("Chunking extracted text...", 45)
     chunks = chunk_text(text)
+    if progress_callback:
+        progress_callback(f"Created {len(chunks)} text chunks.", 50)
 
     return {
         "pdf_id": _generate_pdf_id(filename),

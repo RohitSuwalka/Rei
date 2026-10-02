@@ -1,4 +1,8 @@
 import chromadb
+from chromadb.api import ClientAPI
+from chromadb.api.types import Metadata, PyEmbedding
+from collections.abc import Callable
+from collections.abc import Sequence
 from pathlib import Path
 
 # ChromaDB persistent directory (same location as existing)
@@ -8,7 +12,7 @@ CHROMA_DIR = str(Path(__file__).parent.parent.parent / "chroma_db")
 _client = None
 
 
-def _get_client() -> chromadb.PersistentClient:
+def _get_client() -> ClientAPI:
     """Get or create the ChromaDB persistent client."""
     global _client
     if _client is None:
@@ -31,8 +35,9 @@ def _collection_name(pdf_id: str) -> str:
 def store_document(
     pdf_id: str,
     chunks: list[str],
-    embeddings: list[list[float]],
+    embeddings: Sequence[Sequence[float]],
     metadata: dict,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> int:
     """
     Store document chunks and embeddings in ChromaDB.
@@ -55,18 +60,25 @@ def store_document(
 
     # Batch insert
     ids = [f"{pdf_id}_chunk_{i}" for i in range(len(chunks))]
-    metadatas = [{"pdf_id": pdf_id, "chunk_index": i} for i in range(len(chunks))]
+    metadatas: list[Metadata] = [
+        {"pdf_id": pdf_id, "chunk_index": i} for i in range(len(chunks))
+    ]
 
     # ChromaDB has batch limits, insert in batches of 500
     batch_size = 500
     for start in range(0, len(chunks), batch_size):
         end = start + batch_size
+        batch_embeddings: list[PyEmbedding] = [
+            list(vector) for vector in embeddings[start:end]
+        ]
         collection.add(
             ids=ids[start:end],
             documents=chunks[start:end],
-            embeddings=embeddings[start:end],
+            embeddings=batch_embeddings,
             metadatas=metadatas[start:end],
         )
+        if progress_callback:
+            progress_callback(min(end, len(chunks)), len(chunks))
 
     return collection.count()
 
@@ -88,24 +100,56 @@ def query_collection(
     except Exception:
         return []
 
+    chunk_count = collection.count()
+    if chunk_count == 0:
+        return []
+
     results = collection.query(
         query_embeddings=[query_embedding],
-        n_results=min(n_results, collection.count()),
+        n_results=min(n_results, chunk_count),
     )
 
-    return results["documents"][0] if results["documents"] else []
+    documents = results["documents"]
+    retrieved_ids = results["ids"]
+    if not documents or not documents[0] or not retrieved_ids or not retrieved_ids[0]:
+        return []
+
+    selected_documents = list(zip(retrieved_ids[0], documents[0]))
+    selected_ids = {chunk_id for chunk_id, _ in selected_documents}
+
+    # Semantic search can favor introductory text; include the ending where
+    # conclusions and final sections commonly appear.
+    tail_start = max(0, chunk_count - 5)
+    tail_ids = [
+        f"{pdf_id}_chunk_{chunk_index}"
+        for chunk_index in range(tail_start, chunk_count)
+        if f"{pdf_id}_chunk_{chunk_index}" not in selected_ids
+    ]
+    if tail_ids:
+        tail = collection.get(ids=tail_ids)
+        tail_documents = tail["documents"]
+        tail_ids_found = tail["ids"]
+        if tail_documents and tail_ids_found:
+            tail_by_id = dict(zip(tail_ids_found, tail_documents))
+            selected_documents.extend(
+                (chunk_id, tail_by_id[chunk_id])
+                for chunk_id in tail_ids
+                if chunk_id in tail_by_id
+            )
+
+    return [document for _, document in selected_documents]
 
 
 def query_all_collections(
     query_embedding: list[float],
     n_results: int = 5,
-) -> list[dict]:
+) -> list[str]:
     """
     Query ALL PDF collections (cross-document search).
     Returns combined results sorted by relevance.
     """
     client = _get_client()
-    all_results = []
+    all_results: list[tuple[float, str]] = []
 
     for col_info in client.list_collections():
         col_name = col_info if isinstance(col_info, str) else col_info.name
@@ -123,22 +167,26 @@ def query_all_collections(
                 n_results=min(n_results, count),
             )
 
-            if results["documents"]:
+            documents = results["documents"]
+            distances = results["distances"]
+            if documents and documents[0]:
+                document_batch = documents[0]
+                distance_batch = (
+                    distances[0]
+                    if distances and distances[0]
+                    else [0.0] * len(document_batch)
+                )
                 for doc, dist in zip(
-                    results["documents"][0],
-                    results["distances"][0] if results.get("distances") else [0] * len(results["documents"][0]),
+                    document_batch,
+                    distance_batch,
                 ):
-                    all_results.append({
-                        "document": doc,
-                        "distance": dist,
-                        "collection": col_name,
-                    })
+                    all_results.append((dist, doc))
         except Exception:
             continue
 
     # Sort by distance (lower = more relevant for L2, depends on metric)
-    all_results.sort(key=lambda x: x["distance"])
-    return [r["document"] for r in all_results[:n_results]]
+    all_results.sort(key=lambda result: result[0])
+    return [document for _, document in all_results[:n_results]]
 
 
 def query_selected_collections(
@@ -166,10 +214,18 @@ def query_selected_collections(
                 n_results=min(n_results, count),
             )
 
-            if results["documents"]:
+            documents = results["documents"]
+            distances = results["distances"]
+            if documents and documents[0]:
+                document_batch = documents[0]
+                distance_batch = (
+                    distances[0]
+                    if distances and distances[0]
+                    else [0.0] * len(document_batch)
+                )
                 for doc, dist in zip(
-                    results["documents"][0],
-                    results["distances"][0] if results.get("distances") else [0] * len(results["documents"][0]),
+                    document_batch,
+                    distance_batch,
                 ):
                     all_results.append({
                         "document": doc,

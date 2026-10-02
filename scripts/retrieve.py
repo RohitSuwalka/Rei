@@ -24,7 +24,12 @@ results = collection.query(
 print("\nTop Results")
 print("=" * 50)
 
-for i, doc in enumerate(results["documents"][0]):
+documents = results["documents"]
+if not documents or not documents[0]:
+    print("No matching documents found.")
+    raise SystemExit(0)
+
+for i, doc in enumerate(documents[0]):
     print(f"\nResult {i+1}")
     print("-" * 30)
     print(doc[:1000])

@@ -41,10 +41,10 @@
 
                 <div class="sidebar-section">
                     <div id="upload-zone" class="upload-zone" tabindex="0" role="button" aria-label="Upload PDF">
-                        <input type="file" id="file-input" accept=".pdf" hidden>
+                        <input type="file" id="file-input" accept=".pdf" multiple hidden>
                         <span class="upload-icon">+</span>
-                        <span class="upload-text">upload pdf</span>
-                        <span class="upload-hint">drop file or click</span>
+                        <span class="upload-text">choose pdf</span>
+                        <span class="upload-hint">select one or more PDFs</span>
                     </div>
                 </div>
 
@@ -128,6 +128,7 @@
                             <button class="toggle-btn provider-btn" data-provider="gemini">gemini</button>
                             <button class="toggle-btn provider-btn" data-provider="anthropic">claude</button>
                             <button class="toggle-btn provider-btn" data-provider="huggingface">huggingface</button>
+                            <button class="toggle-btn provider-btn" data-provider="openrouter">Other</button>
                         </div>
 
                         <!-- OpenAI -->
@@ -135,7 +136,31 @@
                             <label class="settings-label" for="openai-key">api key</label>
                             <input type="password" id="openai-key" class="settings-input" placeholder="sk-...">
                             <label class="settings-label" for="openai-model">model</label>
-                            <input type="text" id="openai-model" class="settings-input" value="gpt-4o-mini" placeholder="e.g. gpt-4o-mini, gpt-4o">
+                            <select id="openai-model" class="settings-input">
+                                <option value="gpt-4o-mini">GPT-4o mini (recommended)</option>
+                                <option value="gpt-4o">GPT-4o</option>
+                                <option value="gpt-4.1-mini">GPT-4.1 mini</option>
+                                <option value="gpt-4.1">GPT-4.1</option>
+                                <option value="o3-mini">o3-mini</option>
+                                <option value="__custom__">Custom model ID...</option>
+                            </select>
+                        </div>
+
+                        <!-- OpenRouter -->
+                        <div id="openrouter-config" class="provider-config hidden">
+                            <label class="settings-label" for="openrouter-key">api key</label>
+                            <input type="password" id="openrouter-key" class="settings-input" placeholder="sk-or-v1-...">
+                            <label class="settings-label" for="openrouter-model">model</label>
+                            <select id="openrouter-model" class="settings-input">
+                                <option value="openrouter/free">Free model router (recommended)</option>
+                                <option value="openai/gpt-4o-mini">OpenAI: GPT-4o mini</option>
+                                <option value="google/gemini-2.5-flash">Google: Gemini 2.5 Flash</option>
+                                <option value="anthropic/claude-sonnet-4-20250514">Anthropic: Claude Sonnet 4</option>
+                                <option value="deepseek/deepseek-chat-v3-0324">DeepSeek: Chat V3</option>
+                                <option value="meta-llama/llama-3.3-70b-instruct:free">Meta: Llama 3.3 70B (free)</option>
+                                <option value="__custom__">Custom model ID...</option>
+                            </select>
+                            <span class="settings-hint">Other uses the OpenRouter API · Free model router by default</span>
                         </div>
 
                         <!-- Gemini -->
@@ -143,15 +168,29 @@
                             <label class="settings-label" for="gemini-key">api key</label>
                             <input type="password" id="gemini-key" class="settings-input" placeholder="AIza...">
                             <label class="settings-label" for="gemini-model">model</label>
-                            <input type="text" id="gemini-model" class="settings-input" value="gemini-2.0-flash" placeholder="e.g. gemini-2.0-flash">
+                            <select id="gemini-model" class="settings-input">
+                                <option value="gemini-3.8-flash">Gemini 3.8 Flash (recommended)</option>
+                                <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                                <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash-Lite</option>
+                                <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
+                                <option value="__custom__">Custom model ID...</option>
+                            </select>
                         </div>
 
                         <!-- Anthropic -->
                         <div id="anthropic-config" class="provider-config hidden">
                             <label class="settings-label" for="anthropic-key">api key</label>
                             <input type="password" id="anthropic-key" class="settings-input" placeholder="sk-ant-...">
+                            <label class="settings-label" for="anthropic-workspace-id">workspace id (if required)</label>
+                            <input type="text" id="anthropic-workspace-id" class="settings-input" placeholder="wrkspc_...">
                             <label class="settings-label" for="anthropic-model">model</label>
-                            <input type="text" id="anthropic-model" class="settings-input" value="claude-sonnet-4-20250514" placeholder="e.g. claude-sonnet-4-20250514">
+                            <select id="anthropic-model" class="settings-input">
+                                <option value="claude-sonnet-5-5">Claude Sonnet 5.5 (recommended)</option>
+                                <option value="claude-opus-5-5">Claude Opus 5.5</option>
+                                <option value="claude-haiku-4-5">Claude Haiku 4.5</option>
+                                <option value="claude-sonnet-4-20250514">Claude Sonnet 4</option>
+                                <option value="__custom__">Custom model ID...</option>
+                            </select>
                         </div>
 
                         <!-- Hugging Face -->
@@ -159,8 +198,17 @@
                             <label class="settings-label" for="huggingface-key">api key</label>
                             <input type="password" id="huggingface-key" class="settings-input" placeholder="hf_...">
                             <label class="settings-label" for="huggingface-model">model id</label>
-                            <input type="text" id="huggingface-model" class="settings-input" value="meta-llama/Meta-Llama-3-8B-Instruct" placeholder="e.g. meta-llama/Meta-Llama-3-8B-Instruct">
+                            <select id="huggingface-model" class="settings-input">
+                                <option value="openai/gpt-oss-120b">OpenAI: GPT-OSS 120B (recommended)</option>
+                                <option value="Qwen/Qwen3-Coder-480B-A35B-Instruct">Qwen3 Coder 480B</option>
+                                <option value="zai-org/GLM-5.3">Z.ai: GLM 5.3</option>
+                                <option value="deepseek-ai/DeepSeek-R1">DeepSeek R1</option>
+                                <option value="Qwen/Qwen3-4B-Thinking-2507">Qwen3 4B Thinking</option>
+                                <option value="__custom__">Custom model ID...</option>
+                            </select>
+                            <span class="settings-hint">Model availability depends on Hugging Face Inference Providers and your token.</span>
                         </div>
+                        <span class="settings-hint">Presets use REI's supported chat APIs. Availability, pricing, and access depend on your provider account; use Custom model ID for another compatible model.</span>
                     </div>
 
                     <!-- Embedding Mode -->

@@ -1,8 +1,10 @@
 import asyncio
-from typing import AsyncGenerator, Optional
+import time
+from typing import AsyncGenerator
+from openai.types.chat import ChatCompletionMessageParam
 
 
-# ─── RAG PROMPT TEMPLATE ─────────────────────────────────────────────
+# ??? RAG PROMPT TEMPLATE ?????????????????????????????????????????????
 RAG_SYSTEM_PROMPT = """You are REI, a helpful document assistant. Answer questions using ONLY the provided context from the user's documents. If the context doesn't contain enough information to answer, say so honestly. Be concise and precise."""
 
 RAG_USER_TEMPLATE = """Context from documents:
@@ -17,22 +19,25 @@ def _build_messages(
     question: str,
     context: str,
     history: list[dict],
-) -> list[dict]:
+) -> list[ChatCompletionMessageParam]:
     """Build the message list for the LLM with system prompt, history, and current question."""
-    messages = [{"role": "system", "content": RAG_SYSTEM_PROMPT}]
+    messages: list[ChatCompletionMessageParam] = [
+        {"role": "system", "content": RAG_SYSTEM_PROMPT}
+    ]
 
-    # Add conversation history (last 10 turns max to manage tokens)
     for msg in history[-10:]:
-        messages.append({"role": msg["role"], "content": msg["content"]})
+        role = msg.get("role")
+        if role in {"system", "user", "assistant"}:
+            messages.append({"role": role, "content": msg["content"]})
+        else:
+            raise ValueError(f"Unsupported conversation role: {role}")
 
-    # Add current question with context
     user_content = RAG_USER_TEMPLATE.format(context=context, question=question)
     messages.append({"role": "user", "content": user_content})
-
     return messages
 
 
-# ─── OLLAMA (LOCAL) ──────────────────────────────────────────────────
+# ??? OLLAMA (LOCAL) ??????????????????????????????????????????????????
 
 async def stream_ollama(
     question: str,
@@ -57,8 +62,6 @@ async def stream_ollama(
                 stream=True,
             )
             for chunk in stream:
-                # ollama 0.6.x returns objects with attribute access
-                # Support both attribute and dict-style access for compatibility
                 try:
                     content = chunk.message.content
                 except AttributeError:
@@ -84,7 +87,7 @@ async def stream_ollama(
         yield item
 
 
-# ─── OPENAI ──────────────────────────────────────────────────────────
+# ??? OPENAI ??????????????????????????????????????????????????????????
 
 async def stream_openai(
     question: str,
@@ -92,11 +95,12 @@ async def stream_openai(
     history: list[dict],
     api_key: str,
     model: str = "gpt-4o-mini",
+    base_url: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """Stream response from OpenAI API."""
     from openai import OpenAI
 
-    client = OpenAI(api_key=api_key)
+    client = OpenAI(api_key=api_key, base_url=base_url)
     messages = _build_messages(question, context, history)
 
     loop = asyncio.get_running_loop()
@@ -129,28 +133,24 @@ async def stream_openai(
         yield item
 
 
-# ─── GOOGLE GEMINI ───────────────────────────────────────────────────
+# ??? GOOGLE GEMINI ???????????????????????????????????????????????????
 
 async def stream_gemini(
     question: str,
     context: str,
     history: list[dict],
     api_key: str,
-    model: str = "gemini-2.0-flash",
+    model: str = "gemini-3.8-flash",
 ) -> AsyncGenerator[str, None]:
     """Stream response from Google Gemini API."""
-    import google.generativeai as genai
+    from google import genai
 
-    genai.configure(api_key=api_key)
-    gen_model = genai.GenerativeModel(model)
+    client = genai.Client(api_key=api_key)
 
-    # Build a single prompt since Gemini's chat interface differs
     full_prompt = RAG_SYSTEM_PROMPT + "\n\n"
-
     for msg in history[-10:]:
         role_label = "User" if msg["role"] == "user" else "Assistant"
         full_prompt += f"{role_label}: {msg['content']}\n\n"
-
     full_prompt += RAG_USER_TEMPLATE.format(context=context, question=question)
 
     loop = asyncio.get_running_loop()
@@ -159,12 +159,27 @@ async def stream_gemini(
 
     def _run_stream():
         try:
-            response = gen_model.generate_content(full_prompt, stream=True)
-            for chunk in response:
-                if chunk.text:
-                    loop.call_soon_threadsafe(async_queue.put_nowait, chunk.text)
-        except Exception as e:
-            loop.call_soon_threadsafe(async_queue.put_nowait, e)
+            emitted_text = False
+            for attempt in range(3):
+                try:
+                    for chunk in client.models.generate_content_stream(
+                        model=model,
+                        contents=full_prompt,
+                    ):
+                        if chunk.text:
+                            emitted_text = True
+                            loop.call_soon_threadsafe(async_queue.put_nowait, chunk.text)
+                    break
+                except Exception as e:
+                    if (
+                        not emitted_text
+                        and attempt < 2
+                        and getattr(e, "code", None) == 503
+                    ):
+                        time.sleep(1.5 * (attempt + 1))
+                        continue
+                    loop.call_soon_threadsafe(async_queue.put_nowait, e)
+                    break
         finally:
             loop.call_soon_threadsafe(async_queue.put_nowait, sentinel)
 
@@ -179,7 +194,7 @@ async def stream_gemini(
         yield item
 
 
-# ─── ANTHROPIC CLAUDE ────────────────────────────────────────────────
+# ??? ANTHROPIC CLAUDE ????????????????????????????????????????????????
 
 async def stream_anthropic(
     question: str,
@@ -187,14 +202,19 @@ async def stream_anthropic(
     history: list[dict],
     api_key: str,
     model: str = "claude-sonnet-4-20250514",
+    workspace_id: str = "",
 ) -> AsyncGenerator[str, None]:
     """Stream response from Anthropic Claude API."""
     import anthropic
 
-    client = anthropic.Anthropic(api_key=api_key)
+    client = anthropic.Anthropic(
+        api_key=api_key,
+        default_headers=(
+            {"anthropic-workspace-id": workspace_id} if workspace_id else None
+        ),
+    )
     messages = []
 
-    # Claude uses separate system param
     for msg in history[-10:]:
         messages.append({"role": msg["role"], "content": msg["content"]})
 
@@ -207,7 +227,6 @@ async def stream_anthropic(
 
     def _run_stream():
         try:
-            # Use context manager for proper cleanup
             with client.messages.stream(
                 model=model,
                 max_tokens=4096,
@@ -217,21 +236,6 @@ async def stream_anthropic(
                 for text in stream.text_stream:
                     if text:
                         loop.call_soon_threadsafe(async_queue.put_nowait, text)
-        except AttributeError:
-            # Fallback for older anthropic library versions
-            try:
-                stream = client.messages.create(
-                    model=model,
-                    max_tokens=4096,
-                    system=RAG_SYSTEM_PROMPT,
-                    messages=messages,
-                    stream=True,
-                )
-                for event in stream:
-                    if hasattr(event, "delta") and hasattr(event.delta, "text"):
-                        loop.call_soon_threadsafe(async_queue.put_nowait, event.delta.text)
-            except Exception as e:
-                loop.call_soon_threadsafe(async_queue.put_nowait, e)
         except Exception as e:
             loop.call_soon_threadsafe(async_queue.put_nowait, e)
         finally:
@@ -248,14 +252,14 @@ async def stream_anthropic(
         yield item
 
 
-# ─── HUGGING FACE ───────────────────────────────────────────────────
+# ??? HUGGING FACE ???????????????????????????????????????????????????
 
 async def stream_huggingface(
     question: str,
     context: str,
     history: list[dict],
     api_key: str,
-    model: str = "meta-llama/Meta-Llama-3-8B-Instruct",
+    model: str = "openai/gpt-oss-120b",
 ) -> AsyncGenerator[str, None]:
     """Stream response from Hugging Face Inference API."""
     import json
@@ -278,6 +282,14 @@ async def stream_huggingface(
             async with client.stream("POST", url, headers=headers, json=data) as response:
                 if response.status_code != 200:
                     err_text = await response.aread()
+                    if response.status_code == 400 and b"model_not_supported" in err_text:
+                        yield (
+                            "Error: This Hugging Face model is not available from any "
+                            "Inference Provider enabled for your account. Choose an available "
+                            "chat model in the Hugging Face Playground and enter its model ID "
+                            "in REI Settings."
+                        )
+                        return
                     yield f"Error: Hugging Face API returned status {response.status_code} - {err_text.decode(errors='ignore')}"
                     return
 
@@ -299,7 +311,7 @@ async def stream_huggingface(
         yield f"Error connecting to Hugging Face: {str(e)}"
 
 
-# ─── UNIFIED INTERFACE ──────────────────────────────────────────────
+# ??? UNIFIED INTERFACE ??????????????????????????????????????????????
 
 async def generate(
     question: str,
@@ -330,9 +342,25 @@ async def generate(
             async for token in stream_openai(question, context, history, api_key, model):
                 yield token
 
+        elif provider == "openrouter":
+            api_key = config.get("openrouter_api_key", "")
+            model = config.get("openrouter_model", "openrouter/free")
+            if not api_key:
+                yield "Error: OpenRouter API key not configured. Please add it in Settings."
+                return
+            async for token in stream_openai(
+                question,
+                context,
+                history,
+                api_key,
+                model,
+                base_url="https://openrouter.ai/api/v1",
+            ):
+                yield token
+
         elif provider == "gemini":
             api_key = config.get("gemini_api_key", "")
-            model = config.get("gemini_model", "gemini-2.0-flash")
+            model = config.get("gemini_model", "gemini-3.8-flash")
             if not api_key:
                 yield "Error: Gemini API key not configured. Please add it in Settings."
                 return
@@ -345,12 +373,20 @@ async def generate(
             if not api_key:
                 yield "Error: Anthropic API key not configured. Please add it in Settings."
                 return
-            async for token in stream_anthropic(question, context, history, api_key, model):
+            workspace_id = config.get("anthropic_workspace_id", "").strip()
+            async for token in stream_anthropic(
+                question,
+                context,
+                history,
+                api_key,
+                model,
+                workspace_id,
+            ):
                 yield token
 
         elif provider == "huggingface":
             api_key = config.get("huggingface_api_key", "")
-            model = config.get("huggingface_model", "meta-llama/Meta-Llama-3-8B-Instruct")
+            model = config.get("huggingface_model", "openai/gpt-oss-120b")
             if not api_key:
                 yield "Error: Hugging Face API key not configured. Please add it in Settings."
                 return

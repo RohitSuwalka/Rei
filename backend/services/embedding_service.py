@@ -1,4 +1,4 @@
-import numpy as np
+from collections.abc import Callable
 from typing import Optional
 
 # Lazy-loaded singleton for local model
@@ -14,40 +14,59 @@ def _get_local_model():
     return _local_model
 
 
-def embed_local(texts: list[str]) -> list[list[float]]:
+def embed_local(
+    texts: list[str],
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> list[list[float]]:
     """
     Generate embeddings using local SentenceTransformer.
     Same model as existing create_embeddings.py: all-MiniLM-L6-v2
     Returns list of embedding vectors.
     """
     model = _get_local_model()
-    embeddings = model.encode(texts)
-    return embeddings.tolist()
+    batch_size = 64
+    embeddings = []
+    for start in range(0, len(texts), batch_size):
+        batch = texts[start:start + batch_size]
+        embeddings.extend(model.encode(batch).tolist())
+        if progress_callback:
+            progress_callback(min(start + len(batch), len(texts)), len(texts))
+    return embeddings
 
 
-def embed_openai(texts: list[str], api_key: str, model: str = "text-embedding-3-small") -> list[list[float]]:
+def embed_openai(
+    texts: list[str],
+    api_key: str,
+    model: str = "text-embedding-3-small",
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> list[list[float]]:
     """Generate embeddings using OpenAI API."""
     from openai import OpenAI
     client = OpenAI(api_key=api_key)
-    response = client.embeddings.create(
-        input=texts,
-        model=model,
-    )
-    return [item.embedding for item in response.data]
+    batch_size = 100
+    embeddings = []
+    for start in range(0, len(texts), batch_size):
+        batch = texts[start:start + batch_size]
+        response = client.embeddings.create(input=batch, model=model)
+        embeddings.extend(item.embedding for item in response.data)
+        if progress_callback:
+            progress_callback(min(start + len(batch), len(texts)), len(texts))
+    return embeddings
 
 
 def embed(
     texts: list[str],
     mode: str = "local",
     api_key: Optional[str] = None,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> list[list[float]]:
     """
     Unified embedding interface.
     mode: "local" (sentence-transformers) or "api" (OpenAI)
     """
     if mode == "api" and api_key:
-        return embed_openai(texts, api_key)
-    return embed_local(texts)
+        return embed_openai(texts, api_key, progress_callback=progress_callback)
+    return embed_local(texts, progress_callback=progress_callback)
 
 
 def embed_query(

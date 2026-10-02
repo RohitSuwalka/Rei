@@ -6,6 +6,6 @@ sentence-transformers
 chromadb
 ollama
 openai
-google-generativeai
+google-genai
 anthropic
 python-multipart

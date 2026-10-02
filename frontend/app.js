@@ -21,6 +21,7 @@
 
     const $ = (sel) => document.querySelector(sel);
     const $$ = (sel) => document.querySelectorAll(sel);
+    const modelControls = {};
 
     const els = {
         pdfList:        $('#pdf-list'),
@@ -77,12 +78,54 @@
             if (!res.ok) throw new Error(await res.text());
             return res.json();
         },
-        async upload(file) {
+        async uploadWithProgress(files, onProgress, onUploaded = () => {}) {
+            const fileList = Array.from(files);
+            const isMultiple = fileList.length > 1;
             const form = new FormData();
-            form.append('file', file);
-            const res = await fetch('/api/upload', { method: 'POST', body: form });
+            const fieldName = isMultiple ? 'files' : 'file';
+            fileList.forEach(file => form.append(fieldName, file));
+            const endpoint = isMultiple ? '/api/upload-multiple-progress' : '/api/upload-progress';
+            const res = await fetch(endpoint, { method: 'POST', body: form });
             if (!res.ok) throw new Error(await res.text());
-            return res.json();
+
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            let result = null;
+
+            const processEvent = (block) => {
+                const data = block
+                    .split(/\r?\n/)
+                    .filter(line => line.startsWith('data: '))
+                    .map(line => line.slice(6))
+                    .join('\n');
+                if (!data || data === '[DONE]') return;
+
+                const event = JSON.parse(data);
+                if (event.type === 'progress') {
+                    onProgress(event.stage, event.progress);
+                } else if (event.type === 'uploaded') {
+                    onUploaded(event.uploaded);
+                } else if (event.type === 'result') {
+                    result = event.result;
+                } else if (event.type === 'error') {
+                    throw new Error(event.message);
+                }
+            };
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                const blocks = buffer.split(/\r?\n\r?\n/);
+                buffer = blocks.pop() || '';
+                blocks.forEach(processEvent);
+            }
+
+            buffer += decoder.decode();
+            if (buffer.trim()) processEvent(buffer);
+            if (!result) throw new Error('Upload stream ended before processing completed.');
+            return result;
         },
     };
 
@@ -257,17 +300,13 @@
     }
 
     async function uploadPdf(file) {
-        showUploadProgress('reading pdf...');
+        showUploadProgress(`Preparing ${file.name}...`);
 
         try {
-            setProgress(10);
-            showUploadProgress('extracting text & chunking...');
-            setProgress(30);
-
-            const result = await API.upload(file);
-
-            setProgress(80);
-            showUploadProgress('storing embeddings...');
+            const result = await API.uploadWithProgress([file], (stage, percent) => {
+                showUploadProgress(stage);
+                setProgress(percent);
+            });
 
             if (result.success && result.pdf_info) {
                 state.pdfs.push(result.pdf_info);
@@ -280,6 +319,47 @@
             setTimeout(hideUploadProgress, 400);
             updateUI();
 
+        } catch (e) {
+            hideUploadProgress();
+            const detail = extractError(e);
+            addSystemMessage(`upload failed: ${detail}`);
+        }
+    }
+
+    async function uploadFiles(files) {
+        const validFiles = Array.from(files).filter(file => file && file.name && file.name.toLowerCase().endsWith('.pdf'));
+
+        if (!validFiles.length) {
+            addSystemMessage('please choose a valid PDF file.');
+            return;
+        }
+
+        if (validFiles.length === 1) {
+            await uploadPdf(validFiles[0]);
+            return;
+        }
+
+        showUploadProgress(`Preparing ${validFiles.length} PDFs...`);
+
+        try {
+            const result = await API.uploadWithProgress(
+                validFiles,
+                (stage, percent) => {
+                    showUploadProgress(stage);
+                    setProgress(percent);
+                },
+                item => {
+                    if (item && item.pdf_info) {
+                        state.pdfs.push(item.pdf_info);
+                        state.selectedPdfIds.add(item.pdf_info.pdf_id);
+                        state.scope = 'selected';
+                        updateUI();
+                    }
+                }
+            );
+            setProgress(100);
+            setTimeout(hideUploadProgress, 400);
+            updateUI();
         } catch (e) {
             hideUploadProgress();
             const detail = extractError(e);
@@ -329,14 +409,15 @@
     function addTypingIndicator() {
         const indicator = document.createElement('div');
         indicator.className = 'chat-msg typing-msg';
+        indicator.setAttribute('role', 'status');
+        indicator.setAttribute('aria-live', 'polite');
         indicator.innerHTML = `
             <div class="msg-header">
                 <span class="msg-role role-rei">rei</span>
             </div>
             <div class="typing-indicator">
-                <div class="typing-dot"></div>
-                <div class="typing-dot"></div>
-                <div class="typing-dot"></div>
+                <span class="typing-spinner" aria-hidden="true"></span>
+                <span>REI is processing your question...</span>
             </div>
         `;
         els.chatMessages.appendChild(indicator);
@@ -399,15 +480,11 @@
                 }),
             });
 
-            // Remove typing indicator
-            typing.remove();
-
             if (!response.ok) {
                 throw new Error(await response.text());
             }
 
-            // Create assistant message container
-            const contentEl = addAssistantMessage();
+            let contentEl = null;
             let fullResponse = '';
 
             // Read SSE stream
@@ -431,6 +508,11 @@
                     const data = line.slice(6);
                     if (data === '[DONE]') continue;
 
+                    if (!contentEl) {
+                        typing.remove();
+                        contentEl = addAssistantMessage();
+                    }
+
                     // Unescape newlines
                     const token = data.replace(/\\n/g, '\n');
                     fullResponse += token;
@@ -449,6 +531,7 @@
             const detail = extractError(e);
             addSystemMessage(`error: ${detail}`);
         } finally {
+            typing.remove();
             state.isStreaming = false;
             updateSendBtn();
         }
@@ -463,6 +546,73 @@
 
     function closeSettings() {
         els.settingsOverlay.classList.add('hidden');
+    }
+
+    function getModelControl(provider) {
+        if (!modelControls[provider]) {
+            modelControls[provider] = {
+                select: $(`#${provider}-model`),
+                customInput: null,
+                customWrapper: null,
+            };
+        }
+        return modelControls[provider];
+    }
+
+    function showCustomModelInput(provider, model = '') {
+        const control = getModelControl(provider);
+        if (!control.customInput) {
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.id = `${provider}-model`;
+            input.className = 'settings-input';
+            input.setAttribute('aria-label', `${provider} model ID`);
+            input.placeholder = 'Enter model ID';
+
+            const wrapper = document.createElement('div');
+            wrapper.appendChild(input);
+
+            const choosePreset = document.createElement('button');
+            choosePreset.type = 'button';
+            choosePreset.className = 'model-preset-btn';
+            choosePreset.textContent = 'choose preset';
+            choosePreset.addEventListener('click', () => {
+                control.customWrapper.replaceWith(control.select);
+                control.select.value = control.select.options[0].value;
+            });
+            wrapper.appendChild(choosePreset);
+
+            control.customInput = input;
+            control.customWrapper = wrapper;
+        }
+
+        control.customInput.value = model;
+        control.select.replaceWith(control.customWrapper);
+    }
+
+    function setModelSelection(provider, model) {
+        const control = getModelControl(provider);
+        const presetExists = Array.from(control.select.options).some(
+            option => option.value === model
+        );
+        if (presetExists) {
+            if (control.customWrapper?.isConnected) {
+                control.customWrapper.replaceWith(control.select);
+            }
+            control.select.value = model;
+        } else {
+            showCustomModelInput(provider, model);
+        }
+    }
+
+    function getModelSelection(provider, savedModel) {
+        const control = getModelControl(provider);
+        if (control.customWrapper?.isConnected) {
+            return control.customInput.value.trim() || savedModel || '';
+        }
+        return control.select.value === '__custom__'
+            ? control.customInput?.value.trim() || savedModel || ''
+            : control.select.value;
     }
 
     function loadSettingsIntoForm() {
@@ -489,13 +639,16 @@
 
         // API keys and models (show masked or actual)
         $('#openai-key').value = s.openai_api_key || '';
-        $('#openai-model').value = s.openai_model || 'gpt-4o-mini';
+        setModelSelection('openai', s.openai_model || 'gpt-4o-mini');
+        $('#openrouter-key').value = s.openrouter_api_key || '';
+        setModelSelection('openrouter', s.openrouter_model || 'openrouter/free');
         $('#gemini-key').value = s.gemini_api_key || '';
-        $('#gemini-model').value = s.gemini_model || 'gemini-2.0-flash';
+        setModelSelection('gemini', s.gemini_model || 'gemini-3.8-flash');
         $('#anthropic-key').value = s.anthropic_api_key || '';
-        $('#anthropic-model').value = s.anthropic_model || 'claude-sonnet-4-20250514';
+        $('#anthropic-workspace-id').value = s.anthropic_workspace_id || '';
+        setModelSelection('anthropic', s.anthropic_model || 'claude-sonnet-4-20250514');
         $('#huggingface-key').value = s.huggingface_api_key || '';
-        $('#huggingface-model').value = s.huggingface_model || 'meta-llama/Meta-Llama-3-8B-Instruct';
+        setModelSelection('huggingface', s.huggingface_model || 'openai/gpt-oss-120b');
 
         // Embedding mode
         $$('.embed-mode-btn').forEach(btn => {
@@ -515,15 +668,38 @@
             api_provider: $('.provider-btn.active')?.dataset.provider || 'openai',
             ollama_model: $('#ollama-model').value,
             openai_api_key: $('#openai-key').value,
-            openai_model: $('#openai-model').value,
+            openai_model: getModelSelection('openai', state.settings.openai_model),
+            openrouter_api_key: $('#openrouter-key').value,
+            openrouter_model: getModelSelection('openrouter', state.settings.openrouter_model),
             gemini_api_key: $('#gemini-key').value,
-            gemini_model: $('#gemini-model').value,
+            gemini_model: getModelSelection('gemini', state.settings.gemini_model),
             anthropic_api_key: $('#anthropic-key').value,
-            anthropic_model: $('#anthropic-model').value,
+            anthropic_workspace_id: $('#anthropic-workspace-id').value.trim(),
+            anthropic_model: getModelSelection('anthropic', state.settings.anthropic_model),
             huggingface_api_key: $('#huggingface-key').value,
-            huggingface_model: $('#huggingface-model').value,
+            huggingface_model: getModelSelection('huggingface', state.settings.huggingface_model),
             embedding_mode: $('.embed-mode-btn.active')?.dataset.mode || 'local',
         };
+
+        const missingModel = [
+            'openai',
+            'openrouter',
+            'gemini',
+            'anthropic',
+            'huggingface',
+        ].find(provider => {
+            const control = getModelControl(provider);
+            return control.customWrapper?.isConnected
+                && !control.customInput.value.trim();
+        });
+        if (missingModel) {
+            const input = getModelControl(missingModel).customInput;
+            input.focus();
+            input.placeholder = 'Enter a model ID before saving';
+            els.settingsStatus.textContent = 'model ID required';
+            els.settingsStatus.style.color = 'var(--error)';
+            return;
+        }
 
         try {
             await API.post('/settings', settings);
@@ -549,7 +725,10 @@
             if (e.key === 'Enter' || e.key === ' ') els.fileInput.click();
         });
         els.fileInput.addEventListener('change', (e) => {
-            if (e.target.files[0]) uploadPdf(e.target.files[0]);
+            const files = Array.from(e.target.files || []);
+            if (files.length) {
+                uploadFiles(files);
+            }
             e.target.value = '';
         });
 
@@ -564,9 +743,9 @@
         els.uploadZone.addEventListener('drop', (e) => {
             e.preventDefault();
             els.uploadZone.classList.remove('drag-over');
-            const file = e.dataTransfer.files[0];
-            if (file && file.name.toLowerCase().endsWith('.pdf')) {
-                uploadPdf(file);
+            const files = Array.from(e.dataTransfer.files || []);
+            if (files.length) {
+                uploadFiles(files);
             }
         });
 
@@ -621,11 +800,26 @@
             });
         });
 
+        ['openai', 'openrouter', 'gemini', 'anthropic', 'huggingface'].forEach(provider => {
+            const control = getModelControl(provider);
+            control.select.addEventListener('change', () => {
+                if (control.select.value === '__custom__') {
+                    showCustomModelInput(provider);
+                    control.customInput.focus();
+                }
+            });
+        });
+
         // Embedding mode toggle
         $$('.embed-mode-btn').forEach(btn => {
             btn.addEventListener('click', () => {
                 $$('.embed-mode-btn').forEach(b => b.classList.remove('active'));
                 btn.classList.add('active');
+                if (btn.dataset.mode === 'api') {
+                    window.alert(
+                        'HAHAHA!!! OpenAI embeddings can cost money—check pricing first. Chup chap local use karle 😄'
+                    );
+                }
             });
         });
 
